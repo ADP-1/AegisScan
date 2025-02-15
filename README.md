@@ -31,6 +31,7 @@ source .venv/bin/activate  # Linux/macOS
 
 # Install dependencies
 pip install -r requirements.txt
+pip install .  # Add package installation
 
 # Initialize submodules (for security tools)
 git submodule update --init --recursive
@@ -39,13 +40,13 @@ git submodule update --init --recursive
 ## Usage
 ```bash
 # Basic scan
-python security_scanner.py -u https://example.com
+aegisscan -u "https://example.com"
 
 # Full scan with all tests
-python security_scanner.py -u https://example.com --all
+aegisscan -u "https://example.com" --all
 
 # Custom scan with specific output
-python security_scanner.py -u https://example.com --sqlmap --xss --output report.json
+aegisscan -u "https://example.com" --sqlmap --xss --output report.json
 ```
 
 ## Command Line Options
@@ -59,9 +60,3 @@ python security_scanner.py -u https://example.com --sqlmap --xss --output report
   --format {json,txt,html}  Report format
   --output OUTPUT       Output file name
 ```
-
-## Contributing
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
-
-## License
-MIT License - See [LICENSE](LICENSE) for details 
