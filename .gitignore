@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyd
+*.pyo
+*.egg-info/
+*.egg
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.sublime-workspace
+
+# Reports (ignore generated reports, keep sample)
+reports/*
+!reports/sample_report.json
+
+# Local configurations
+config.ini
+.env
+.secrets
+
+# Logs
+*.log
+
+# External tools (if cloned as submodules)
+tools/sqlmap/
+tools/xsstrike/
+
+# Testing artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Build/distributions
+dist/
+build/
+*.exe
+*.spec 
