@@ -56,6 +56,8 @@ This lean structure minimizes overhead while ensuring scalability and ease of ma
   - **Scan Depth:** Configurable depth (`--depth`) to control the extent of vulnerability analysis.
   - **Test Selection:** Flags to run specific tests, e.g., `--sqlmap` for SQLi, `--xss` for XSS, `--csrf` for CSRF, or `--all` for a full scan.
   - **Output Options:** Ability to specify output format (`--format` with JSON, TXT, or HTML) and destination file (`--output`).
+- **Interactive Mode**: When launched without arguments, provides a menu-driven interface
+- **Multi-Mode Support**: Combine argument-based and interactive usage patterns
   
 ### 3.2 Vulnerability Detection Modules
 

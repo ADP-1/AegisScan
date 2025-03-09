@@ -1,7 +1,9 @@
 # Core dependencies
 requests==2.31.0
-beautifulsoup4==4.12.3  # for webScrpping
+beautifulsoup4==4.12.2  # for webScrpping
 argparse==1.4.0 #commandline Argument processing 
 
 # Testing
 pytest==8.1.1 
+
+# Add other dependencies for sqlmap/xsstrike integration 

@@ -1,0 +1,6 @@
+[submodule "scanner/sqlmap"]
+	path = scanner/sqlmap
+	url = https://github.com/sqlmapproject/sqlmap.git
+[submodule "scanner/xsstrike"]
+	path = scanner/xsstrike
+	url = https://github.com/s0md3v/XSStrike.git
