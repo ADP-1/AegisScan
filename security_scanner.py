@@ -3,6 +3,23 @@ from scanner import SQLiScanner, XSSScanner, CSRFAnalyzer
 from reports import ReportGenerator
 import sys
 import os
+import time
+import subprocess
+import threading
+from queue import Queue
+import shutil
+from utils.progress import ProgressHandler
+
+# Add this constant near top of file
+ATTACK_MENU_PROMPT = """\nSelect Attack Type:
+1. SQL Injection
+2. XSS (Cross-Site Scripting) 
+3. CSRF (Cross-Site Request Forgery)
+4. Run All Scans
+5. Go Back
+6. Exit
+
+Enter attack choice (1-6): """
 
 def main():
     if len(sys.argv) > 1:
@@ -43,75 +60,214 @@ def main():
         interactive_mode()
 
 def interactive_mode():
+    print_banner()
     while True:
-        terminal_height = os.get_terminal_size().lines
-        if terminal_height < 24:  # Minimum recommended height
-            print("\n" * 3)  # Emergency padding
-            print("Please increase terminal height for proper display")
-        
-        clear_screen()
-        print_banner()
-        print_main_menu(terminal_height)
+        print_main_menu()
         handle_choice()
-
-def print_main_menu(term_height):
-    menu_lines = 6  # Count of menu text lines
-    padding = max(0, term_height - menu_lines - 15)  # 15 lines for banner
-    print(f"\nAegisScan Interactive Mode\n{'=' * 30}")
-    print("1. About AegisScan\n2. Set Target for Scanning\n3. Exit")
-    print("\n" * padding)  # Dynamic padding based on terminal size
 
 def handle_choice():
     try:
-        choice = input("\033[FEnter your choice (1-3): ")  # \033[F moves cursor up
+        choice = input("\nEnter your choice (1-3): ")
         process_choice(choice)
     except KeyboardInterrupt:
         exit_program()
 
-def attack_menu(target):
-    while True:
-        clear_screen()
-        print(f"\nTarget: {target}")
-        print("""Select Attack Type:
-1. SQL Injection
-2. XSS (Cross-Site Scripting) 
-3. CSRF (Cross-Site Request Forgery)
-4. Run All Scans
-5. Go Back
-6. Exit""")
-        
-        choice = input("\nEnter attack choice (1-6): ")
-        
-        if choice == '1':
-            run_scan(SQLiScanner(target))
-        elif choice == '2':
-            run_scan(XSSScanner(target))
-        elif choice == '3':
-            run_scan(CSRFAnalyzer(target))
-        elif choice == '4':
-            run_all_scans(target)
-        elif choice == '5':
-            return
-        elif choice == '6':
-            exit_program()
-        else:
-            invalid_choice()
+def process_choice(choice):
+    if choice == '1':
+        show_about()
+    elif choice == '2':
+        target = get_target_url()
+        if target:
+            attack_menu(target)
+    elif choice == '3':
+        exit_program()
+    else:
+        invalid_choice()
 
-def run_scan(scanner):
+def print_main_menu():
+    print("""\nAegisScan Interactive Mode
+1. About AegisScan
+2. Set Target for Scanning
+3. Exit""")
+
+def check_tool_installed(tool_name):
+    """Check if required security tool is installed"""
+    if shutil.which(tool_name) is None:
+        print(f"\n🔧 {tool_name} not found! Install with:")
+        print(f"  pip install {tool_name}")
+        print("  or download from official repository")
+        return False
+    return True
+
+def run_scan_tool(scanner, progress_handler, result_queue):
     try:
-        print(f"\nStarting {scanner.__class__.__name__} scan...")
+        progress_handler.running = True
+        scanner.progress_handler = progress_handler
         results = scanner.run_scan()
+        result_queue.put((True, results))
+    except Exception as e:
+        result_queue.put((False, str(e)))
+    finally:
+        progress_handler.running = False
+
+def display_progress(handler):
+    """Animated progress bar that updates in-place"""
+    start_time = time.time()
+    while handler.running or (time.time() - start_time < 30):  # Add timeout
+        current = handler.get_progress()
+        bar = f"[{'■' * int(current/5)}{' ' * (20 - int(current/5))}]"
+        sys.stdout.write(f"\rScan Progress: {bar} {current}%")
+        sys.stdout.flush()
+        time.sleep(0.1)
+    print("\n")
+
+def get_scan_command(scan_type, target):
+    """Return appropriate command for each scan type"""
+    scan_commands = {
+        "SQLi": ["sqlmap", "-u", target, "--batch", "--output-dir=./reports"],
+        "XSS": ["xsstrike", "-u", target, "--crawl"],
+        "CSRF": ["csrf-scanner", target]
+    }
+    
+    if scan_type not in scan_commands:
+        raise ValueError(f"Invalid scan type: {scan_type}")
+    
+    return scan_commands[scan_type]
+
+def execute_security_scan(scan_type, target):
+    """Execute scan with real SQLMap integration"""
+    progress = ProgressHandler()
+    scanners = {
+        "SQLi": SQLiScanner(target, progress),
+        "XSS": XSSScanner(target),
+        "CSRF": CSRFAnalyzer(target)
+    }
+    
+    if scan_type not in scanners:
+        return None
+
+    scanner = scanners[scan_type]
+    result_queue = Queue()
+
+    # Start scan thread
+    scan_thread = threading.Thread(
+        target=run_scan_tool,
+        args=(scanner, progress, result_queue)
+    )
+    scan_thread.start()
+
+    # Display progress
+    print(f"\n🚀 Starting {scan_type} scan...")
+    display_progress(progress)
+    
+    # Get results
+    success, output = result_queue.get()
+    scan_thread.join()
+    
+    return format_scan_results(output) if success else None
+
+def format_scan_results(raw_output, scan_type):
+    """Convert tool output to structured report"""
+    # Implement parsing logic based on your sample format
+    report = {
+        "scan_summary": {
+            "date": time.strftime("%Y-%m-%d"),
+            "target": "https://example.com",
+            "vulnerabilities": 3,
+            "severity": "CRITICAL"
+        },
+        "findings": [...]  # Add parsed findings here
+    }
+    
+    return f"""
+[+] {scan_type.upper()} SCAN RESULTS
+───────────────────────────────────────────────
+  ✅ Vulnerabilities Found: {report['scan_summary']['vulnerabilities']}
+  ⚠️  Maximum Severity: {report['scan_summary']['severity']}
+───────────────────────────────────────────────
+    """
+
+def handle_scan_errors(error):
+    """User-friendly error handling"""
+    if "FileNotFound" in error or "WinError 2" in error:
+        print("\n🔴 Error: Required tool not found!")
+        print("  1. Check tool installation")
+        print("  2. Verify PATH environment variable")
+        print("  3. Use absolute path to tool executable")
+    else:
+        print(f"\n❌ Scan failed: {error}")
+
+def attack_menu(target):
+    last_results = None
+    while True:
+        print("\n")
+        print_banner()
+        
+        # Persistent target header
+        print(f"Active Target: {target}\n" + "=" * shutil.get_terminal_size().columns)
+        
+        # Display last results if available
+        if last_results:
+            print("\nLAST SCAN RESULTS:")
+            print("-" * shutil.get_terminal_size().columns)
+            print(last_results)
+            print("-" * shutil.get_terminal_size().columns + "\n")
+        
+        # Show attack menu
+        print(ATTACK_MENU_PROMPT, end='')
+        
+        try:
+            choice = input().strip()
+            
+            if choice == '1':
+                # Run scan without clearing screen
+                sys.stdout.write("\033[F")  # Move cursor up one line
+                sys.stdout.write("\033[K")  # Clear input line
+                last_results = execute_security_scan("SQLi", target)
+                if last_results:
+                    input("\nPress Enter to return to menu...")
+            
+            elif choice == '2': 
+                execute_security_scan("XSS", target)
+            elif choice == '3':
+                execute_security_scan("CSRF", target)
+            elif choice == '4':
+                run_all_scans(target)
+            elif choice == '5':
+                return  # Exit to main menu
+            elif choice == '6':
+                exit_program()
+            else:
+                invalid_choice()
+            
+        except KeyboardInterrupt:
+            exit_program()
+
+def run_scan(choice, target):
+    try:
+        scanner = {
+            '1': SQLiScanner,
+            '2': XSSScanner,
+            '3': CSRFAnalyzer,
+            '4': None
+        }[choice]
+        
+        if choice == '4':
+            return run_all_scans(target)
+            
+        print(f"\nStarting {scanner.__name__} scan...")
+        results = scanner(target).run_scan()
         display_results(results)
-        input("\nPress Enter to continue...")
+        return results
+        
     except Exception as e:
         print(f"Scan failed: {str(e)}")
-
-# Helper functions
-def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
+        return None
+    finally:
+        input("\nPress Enter to return to menu...")
 
 def exit_program():
-    print("\nExiting AegisScan...")
+    print("\n\nExiting AegisScan...")
     sys.exit(0)
 
 def print_banner():
@@ -126,6 +282,43 @@ def print_banner():
                                                                       
     """)
     print("AegisScan - Web Application Security Analyzer v0.1.0\n")
+
+def show_about():
+    print("""AegisScan v0.1.0
+A CLI-based web application security analyzer
+Designed for detecting SQLi, XSS, and CSRF vulnerabilities
+Developed by Aditya Pandey & Masood Aslam""")
+    input("\nPress Enter to return...")
+
+def get_target_url():
+    print("Set Target URL\n" + "="*30)
+    url = input("\nEnter target URL: ").strip()
+    
+    if not url.startswith(('http://', 'https://')):
+        print("Invalid URL - must start with http:// or https://")
+        time.sleep(1.5)
+        return None
+        
+    print(f"\nTarget set to: {url}")
+    input("Press Enter to continue...")
+    return url
+
+def invalid_choice():
+    print("Invalid selection - please choose 1-3")
+    time.sleep(1)
+
+def display_results(results):
+    if isinstance(results, dict) and 'scan_summary' in results:
+        print(SQLiScanner("").generate_report(results))
+    else:
+        print(f"\nScan Results:\n{'-'*30}")
+        for vuln in results:
+            print(f"[{vuln['severity']}] {vuln['type']}: {vuln['details']}")
+
+def run_all_scans(target):
+    scanners = [SQLiScanner, XSSScanner, CSRFAnalyzer]
+    for scanner in scanners:
+        run_scan(scanner(target))
 
 if __name__ == "__main__":
     main() 

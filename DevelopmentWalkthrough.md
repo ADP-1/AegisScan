@@ -216,4 +216,4 @@ jobs:
 
 ### 🎯 **Final Notes:**
 
-By following this structured approach, you’ll develop a robust **CLI-based Web Application Security Analyzer** in a **modular, scalable, and efficient** way. 🚀
+By following this structured approach, you'll develop a robust **CLI-based Web Application Security Analyzer** in a **modular, scalable, and efficient** way. 🚀
