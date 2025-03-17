@@ -9,6 +9,13 @@ import threading
 from queue import Queue
 import shutil
 from utils.progress import ProgressHandler
+import logging
+
+# Add after imports
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # Add this constant near top of file
 ATTACK_MENU_PROMPT = """\nSelect Attack Type:
@@ -92,12 +99,13 @@ def print_main_menu():
 
 def check_tool_installed(tool_name):
     """Check if required security tool is installed"""
-    if shutil.which(tool_name) is None:
-        print(f"\n🔧 {tool_name} not found! Install with:")
-        print(f"  pip install {tool_name}")
-        print("  or download from official repository")
+    try:
+        result = subprocess.run([tool_name, '--version'], 
+                              capture_output=True, 
+                              text=True)
+        return result.returncode == 0
+    except FileNotFoundError:
         return False
-    return True
 
 def run_scan_tool(scanner, progress_handler, result_queue):
     try:
@@ -136,6 +144,23 @@ def get_scan_command(scan_type, target):
 
 def execute_security_scan(scan_type, target):
     """Execute scan with real SQLMap integration"""
+    # First verify required tools are installed
+    required_tools = {
+        "SQLi": "sqlmap",
+        "XSS": "xsstrike",
+        "CSRF": "csrf-scanner"
+    }
+    
+    if scan_type in required_tools:
+        tool = required_tools[scan_type]
+        if not check_tool_installed(tool):
+            print(f"\n❌ Error: {tool} is not installed!")
+            print(f"Please install {tool} first:")
+            if tool == "sqlmap":
+                print("    pip install sqlmap")
+                print("    or download from: https://github.com/sqlmapproject/sqlmap")
+            return None
+
     progress = ProgressHandler()
     scanners = {
         "SQLi": SQLiScanner(target, progress),
@@ -149,22 +174,27 @@ def execute_security_scan(scan_type, target):
     scanner = scanners[scan_type]
     result_queue = Queue()
 
-    # Start scan thread
-    scan_thread = threading.Thread(
-        target=run_scan_tool,
-        args=(scanner, progress, result_queue)
-    )
-    scan_thread.start()
+    try:
+        # Start scan thread
+        scan_thread = threading.Thread(
+            target=run_scan_tool,
+            args=(scanner, progress, result_queue)
+        )
+        scan_thread.start()
 
-    # Display progress
-    print(f"\n🚀 Starting {scan_type} scan...")
-    display_progress(progress)
-    
-    # Get results
-    success, output = result_queue.get()
-    scan_thread.join()
-    
-    return format_scan_results(output) if success else None
+        # Display progress
+        print(f"\n🚀 Starting {scan_type} scan...")
+        display_progress(progress)
+        
+        # Get results
+        success, output = result_queue.get()
+        scan_thread.join()
+        
+        return format_scan_results(output, scan_type) if success else None
+
+    except Exception as e:
+        handle_scan_errors(str(e))
+        return None
 
 def format_scan_results(raw_output, scan_type):
     """Convert tool output to structured report"""
@@ -176,7 +206,7 @@ def format_scan_results(raw_output, scan_type):
             "vulnerabilities": 3,
             "severity": "CRITICAL"
         },
-        "findings": [...]  # Add parsed findings here
+        "findings": []  # Add parsed findings here
     }
     
     return f"""
@@ -206,13 +236,6 @@ def attack_menu(target):
         # Persistent target header
         print(f"Active Target: {target}\n" + "=" * shutil.get_terminal_size().columns)
         
-        # Display last results if available
-        if last_results:
-            print("\nLAST SCAN RESULTS:")
-            print("-" * shutil.get_terminal_size().columns)
-            print(last_results)
-            print("-" * shutil.get_terminal_size().columns + "\n")
-        
         # Show attack menu
         print(ATTACK_MENU_PROMPT, end='')
         
@@ -220,13 +243,35 @@ def attack_menu(target):
             choice = input().strip()
             
             if choice == '1':
-                # Run scan without clearing screen
-                sys.stdout.write("\033[F")  # Move cursor up one line
-                sys.stdout.write("\033[K")  # Clear input line
-                last_results = execute_security_scan("SQLi", target)
-                if last_results:
-                    input("\nPress Enter to return to menu...")
-            
+                # Initialize progress handler
+                progress = ProgressHandler()
+                scanner = SQLiScanner(target, progress)
+                
+                print("\n🚀 Starting SQL Injection scan...")
+                print("This may take several minutes. Press Ctrl+C to cancel.\n")
+                
+                # Run the scan
+                try:
+                    results = scanner.run_scan()
+                    if results:
+                        if "error" in results:
+                            print(f"\n❌ Scan Error: {results['error']}")
+                        else:
+                            # Format results directly instead of using generate_report
+                            last_results = f"""
+[+] SQL INJECTION SCAN RESULTS
+───────────────────────────────────────────────
+Found Vulnerabilities: {len(results.get('vulnerabilities', {}).get('SQLi', []))}
+Target URL: {target}
+───────────────────────────────────────────────"""
+                            print("\n" + last_results)
+                    else:
+                        print("\n❌ No vulnerabilities found")
+                except Exception as e:
+                    print(f"\n❌ Error during scan: {str(e)}")
+                
+                input("\nPress Enter to continue...")
+                
             elif choice == '2': 
                 execute_security_scan("XSS", target)
             elif choice == '3':
@@ -241,7 +286,9 @@ def attack_menu(target):
                 invalid_choice()
             
         except KeyboardInterrupt:
-            exit_program()
+            print("\n\nScan cancelled by user.")
+            input("\nPress Enter to continue...")
+            continue
 
 def run_scan(choice, target):
     try:

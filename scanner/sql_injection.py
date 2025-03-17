@@ -1,189 +1,333 @@
-from venv import logger
-import requests
-from bs4 import BeautifulSoup
 import subprocess
-from datetime import datetime
-import time
 import json
 import re
-
+import os
+import time
+import logging
+from datetime import datetime
 from utils.progress import ProgressHandler
+import sys
+from colorama import init, Fore, Back, Style
+
+# Initialize colorama for cross-platform colored output
+init(autoreset=True)
+
+# Create logs directory if it doesn't exist
+log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
+os.makedirs(log_dir, exist_ok=True)
+
+logging.basicConfig(
+    filename=os.path.join(log_dir, "sql_injection.log"),
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 class SQLiScanner:
-    def __init__(self, target_url, progress_handler, depth=3):
+    def __init__(self, target_url, progress_handler=None, depth=3, risk=1):
         self.target_url = target_url
         self.depth = depth
+        self.risk = risk
+        self.progress_handler = progress_handler
         self.start_time = None
         self.end_time = None
-        self.progress_handler = progress_handler
-        self.process = None
+        self.output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'reports')
         
-    def run_scan(self):
-        self.start_time = datetime.now()
-        cmd = [
-            "sqlmap", 
-            "-u", self.target_url,
-            "--batch",
-            "--level", str(self.depth),
-            "--output-dir=./reports",
-            "--flush-session"
-        ]
-        
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-        
-        # Stream output in real-time
-        while True:
-            output = self.process.stdout.readline()
-            if not output and self.process.poll() is not None:
-                break
-            if output:
-                self._parse_sqlmap_output(output.strip())
-        
-        self.end_time = datetime.now()
-        self.progress_handler.update_progress(100)  # Force completion
-        return self._parse_results()
+        # Ensure output directory exists
+        os.makedirs(self.output_dir, exist_ok=True)
 
-    def _parse_sqlmap_output(self, line):
-        # Match patterns like: 
-        # [INFO] tested 45% of payloads
-        # [INFO] completed 60% of requests
-        match = re.search(r'(tested|completed).*?(\d+)%', line)
-        if match:
-            try:
-                self.progress_handler.update_progress(int(match.group(2)))
-            except ValueError:
-                pass
+    def run_scan(self):
+        """Runs SQLMap scan on the target URL"""
+        try:
+            self.start_time = datetime.now()
+            print(f"\n{Fore.CYAN}[*] Starting SQL Injection scan on {Fore.YELLOW}{self.target_url}")
+
+            # Direct SQLMap command execution
+            cmd = [
+                "sqlmap",
+                "-u", self.target_url,
+                "--batch",
+                "--random-agent",
+                "--level", str(self.depth),
+                "--risk", str(self.risk),
+                "--output-dir", self.output_dir,
+                "--flush-session",
+                "--threads=10",  # Increased threads for faster scanning
+                "--timeout=30",
+                "--retries=3",
+                "--keep-alive",
+                "--technique=BEUSTQ",
+                "--tamper=space2comment,between",
+                "-v", "3"
+            ]
+
+            print(f"{Fore.BLUE}[*] Executing: {Fore.WHITE}{' '.join(cmd)}\n")
+
+            # Start SQLMap process
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                bufsize=1
+            )
+
+            current_progress = 0
+            print(f"{Fore.GREEN}[+] SQL Injection Scan Progress:")
+            print(f"{Fore.YELLOW}{'=' * 60}")
+
+            while True:
+                output_line = process.stdout.readline()
+                if output_line == '' and process.poll() is not None:
+                    break
+                
+                if output_line:
+                    self._colorize_output(output_line.strip())
+                    current_progress = self._update_progress(output_line, current_progress)
+
+            # Process return code
+            if process.returncode != 0:
+                print(f"\n{Fore.RED}[!] SQLMap process failed with code {process.returncode}")
+                return {"error": "Scan failed"}
+
+            print(f"\n{Fore.GREEN}[✓] Scan Completed!")
+            return self._parse_results()
+
+        except Exception as e:
+            print(f"\n{Fore.RED}[!] Error during scan: {str(e)}")
+            return {"error": str(e)}
+
+    def _colorize_output(self, line):
+        """Colorize SQLMap output based on content"""
+        if "testing " in line.lower():
+            print(f"{Fore.CYAN}[*] {line}")
+        elif "payload: " in line.lower():
+            print(f"{Fore.YELLOW}[>] {line}")
+        elif "parameter " in line.lower() and "appears to be" in line.lower():
+            print(f"{Fore.GREEN}[!] {Back.GREEN}{Fore.WHITE} VULNERABLE {Style.RESET_ALL} {line}")
+        elif "the back-end dbms is" in line.lower():
+            print(f"{Fore.MAGENTA}[+] {line}")
+        elif "database: " in line.lower():
+            print(f"{Fore.BLUE}[*] {line}")
+        elif "table found: " in line.lower():
+            print(f"{Fore.GREEN}[+] {line}")
+        elif "warning" in line.lower():
+            print(f"{Fore.YELLOW}[!] {line}")
+        elif "error" in line.lower():
+            print(f"{Fore.RED}[!] {line}")
+        else:
+            print(f"{Fore.WHITE}{line}")
+
+    def _update_progress(self, line, current_progress):
+        """Update progress bar with color"""
+        if "testing " in line.lower():
+            current_progress += 2
+        elif "parameter '" in line.lower():
+            current_progress += 5
+        elif "the back-end dbms is" in line.lower():
+            current_progress += 10
+
+        current_progress = min(current_progress, 99)
+        
+        if self.progress_handler:
+            self.progress_handler.update_progress(current_progress)
+            bar_length = 40
+            filled = int(current_progress * bar_length / 100)
+            bar = f"{Fore.GREEN}{'█' * filled}{Fore.WHITE}{'░' * (bar_length - filled)}"
+            print(f"\r{Fore.BLUE}Progress: [{bar}] {current_progress}%", end='', flush=True)
+
+        return current_progress
 
     def _parse_results(self):
+        """Parse SQLMap results with colored output"""
         try:
-            with open('./reports/output.json') as f:
-                sqlmap_data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.error(f"Error parsing SQLMap results: {str(e)}")
-            return {"error": "Failed to parse scan results"}
+            # Get target directory from URL
+            target_host = self.target_url.split('//')[1].split('/')[0]
+            target_dir = os.path.join(self.output_dir, target_host)
+            
+            vulnerabilities = []
+            
+            # Check if target directory exists
+            if not os.path.exists(target_dir):
+                logging.warning(f"No results directory found at {target_dir}")
+                return self._create_empty_result()
 
-    def _format_report(self, data):
+            # Parse log file
+            log_file = os.path.join(target_dir, "log")
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as f:
+                    content = f.read()
+                    
+                    # Parse vulnerabilities
+                    if "might be injectable" in content:
+                        vulnerabilities.append({
+                            "parameter": self._extract_parameter(content),
+                            "type": self._extract_vulnerability_type(content),
+                            "severity": "HIGH",
+                            "details": self._extract_details(content)
+                        })
+                    
+                    # Parse boolean-based blind injection
+                    if "appears to be 'AND boolean-based blind" in content:
+                        vulnerabilities.append({
+                            "parameter": self._extract_parameter(content),
+                            "type": "Boolean-based blind SQL injection",
+                            "severity": "HIGH",
+                            "details": "Parameter is vulnerable to boolean-based blind SQL injection"
+                        })
+
+                    # Parse error-based injection
+                    if "appears to be 'MySQL >= 5.0 error-based" in content:
+                        vulnerabilities.append({
+                            "parameter": self._extract_parameter(content),
+                            "type": "Error-based SQL injection",
+                            "severity": "CRITICAL",
+                            "details": "Parameter is vulnerable to error-based SQL injection"
+                        })
+
+            return {
+                "vulnerabilities": {
+                    "SQLi": vulnerabilities
+                },
+                "statistics": {
+                    "duration": str(self.end_time - self.start_time) if self.end_time else "N/A",
+                    "requests": len(vulnerabilities)
+                }
+            }
+
+        except Exception as e:
+            logging.error(f"Error parsing results: {str(e)}")
+            return self._create_empty_result()
+
+    def _extract_parameter(self, content):
+        """Extract vulnerable parameter from SQLMap output"""
+        match = re.search(r"parameter '([^']+)'", content)
+        return match.group(1) if match else "Unknown"
+
+    def _extract_vulnerability_type(self, content):
+        """Extract vulnerability type from SQLMap output"""
+        if "boolean-based blind" in content:
+            return "Boolean-based blind SQL injection"
+        elif "error-based" in content:
+            return "Error-based SQL injection"
+        elif "time-based blind" in content:
+            return "Time-based blind SQL injection"
+        elif "UNION query" in content:
+            return "UNION-based SQL injection"
+        return "SQL injection"
+
+    def _extract_details(self, content):
+        """Extract detailed information from SQLMap output"""
+        details = []
+        
+        if "the back-end DBMS is" in content:
+            dbms_match = re.search(r"the back-end DBMS is '([^']+)'", content)
+            if dbms_match:
+                details.append(f"Database: {dbms_match.group(1)}")
+        
+        if "appears to be" in content:
+            vuln_match = re.search(r"appears to be '([^']+)'", content)
+            if vuln_match:
+                details.append(f"Vulnerability: {vuln_match.group(1)}")
+
+        return " | ".join(details) if details else "SQL injection vulnerability detected"
+
+    def _determine_severity(self, results):
+        """Determine overall severity of findings"""
+        if not results.get("vulnerabilities"):
+            return "NONE"
+        
+        severity_levels = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
+        max_severity = 0
+        
+        for vuln in results.get("vulnerabilities", []):
+            severity = severity_levels.get(vuln.get("severity", "NONE"), 0)
+            max_severity = max(max_severity, severity)
+        
+        for level, value in severity_levels.items():
+            if value == max_severity:
+                return level
+        
+        return "NONE"
+
+    def generate_report(self, results):
+        """Generate a detailed scan report"""
+        if "error" in results:
+            return f"\n❌ Scan failed: {results['error']}"
+
+        vulnerabilities = results.get("vulnerabilities", {}).get("SQLi", [])
+        
+        report = f"""
+🎯 SQL INJECTION SCAN REPORT
+═══════════════════════════════════════════════════════════════
+📅 Scan Date: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}
+⏱️  Duration: {self.end_time - self.start_time if self.end_time else 'N/A'}
+🌐 Target: {self.target_url}
+🎲 Risk Level: {self.risk}
+✨ Found Vulnerabilities: {len(vulnerabilities)}
+
+"""
+
+        if vulnerabilities:
+            report += "�� DETAILED FINDINGS\n"
+            report += "═══════════════════════════════════════════════════════════════\n"
+            
+            for i, vuln in enumerate(vulnerabilities, 1):
+                report += f"""
+🔴 Vulnerability #{i}:
+    Parameter: {vuln['parameter']}
+    Type: {vuln['type']}
+    Severity: {vuln['severity']}
+    Details: {vuln['details']}
+    """
+        else:
+            report += "ℹ️  No SQL injection vulnerabilities were found\n"
+
+        report += "\n═══════════════════════════════════════════════════════════════"
+        return report
+
+    def _create_empty_result(self):
+        """Create an empty result structure"""
         return {
-            "target": self.target_url,
             "vulnerabilities": {
-                "SQLi": [{
-                    "parameter": param['name'],
-                    "type": param['type'],
-                    "payloads": param['payloads'],
-                    "extracted_data": param['extracted_data']
-                } for param in data['parameters']]
+                "SQLi": []
             },
             "statistics": {
-                "requests": data['total_requests'],
-                "response_time": f"{data['avg_response_time']}ms"
+                "duration": "0s",
+                "requests": 0
             }
         }
 
-    def _parse_findings(self, data):
-        return {
-            "url": self.target_url,
-            "method": data['request']['method'],
-            "parameters": [
-                {
-                    "name": param['name'],
-                    "type": param['type'],
-                    "payloads": [
-                        {
-                            "type": payload['type'],
-                            "value": payload['value'],
-                            "response": payload['response'][:100] + "..."
-                        } for payload in param['payloads']
-                    ],
-                    "extracted_data": {
-                        "db_type": data['dbms'],
-                        "version": data['dbms_version'],
-                        "tables": data['tables'][:3]  # Limit for demo
-                    }
-                } for param in data['parameters']
-            ]
-        }
+    def _get_sqlmap_path(self):
+        """Find or install SQLMap"""
+        try:
+            # First try: Check if sqlmap is in PATH
+            result = subprocess.run(["sqlmap", "--version"], 
+                                  capture_output=True, 
+                                  text=True)
+            if result.returncode == 0:
+                return "sqlmap"
+        except FileNotFoundError:
+            print("\n⚠️ SQLMap not found in PATH. Attempting to install...")
+            try:
+                # Try to install sqlmap using pip
+                subprocess.run([sys.executable, "-m", "pip", "install", "sqlmap"], 
+                             check=True)
+                print("✅ SQLMap installed successfully!")
+                return "sqlmap"
+            except subprocess.CalledProcessError:
+                print("❌ Failed to install SQLMap using pip.")
+                print("\nPlease install SQLMap manually:")
+                print("1. Run: pip install sqlmap")
+                print("   or")
+                print("2. Download from: https://github.com/sqlmapproject/sqlmap")
+                return None
 
-    def generate_report(self, results):
-        if 'error' in results:
-            return f"[!] Scan failed: {results['error']}"
-
-        report = f"""
-[+] SCAN SUMMARY
-──────────────────────────────────────────────────────────────
-  📅 Scan Date       : {results['scan_summary']['date']}
-  🕒 Scan Duration   : {results['scan_summary']['duration']}
-  🎯 Target         : {results['scan_summary']['target']}
-  🔍 Scan Type      : {results['scan_summary']['scan_type']}
-  🛠 Tests Performed : {results['scan_summary']['tests_performed']} Completed
-  ✅ Vulnerabilities : {results['scan_summary']['vulnerabilities']} Confirmed SQL Injection
-  📌 Injection Points: {results['scan_summary']['injection_points']} Unique Parameters Affected
-
-[+] SQL INJECTION FINDINGS
-──────────────────────────────────────────────────────────────"""
-        
-        for param in results['findings']['parameters']:
-            report += f"""
-  🌐 URL            : {results['findings']['url']}
-  🔄 Method        : {results['findings']['method']}
-  📌 Affected Param : {param['name']}
-  🔥 Exploitation  : {param['type'].title()} SQL Injection
-  ⚠ Severity      : CRITICAL
-  
-  Payload Used:
-    {param['payloads'][0]['value']}
-
-  Server Response:
-    {param['payloads'][0]['response']}
-
-  Extracted Data:
-    📌 Database Type   : {param['extracted_data']['db_type']}
-    📌 Database Version: {param['extracted_data']['version']}
-    📌 Found Tables    : {', '.join(param['extracted_data']['tables'])}
-──────────────────────────────────────────────────────────────"""
-
-        report += f"""
-[+] SCAN STATISTICS
-──────────────────────────────────────────────────────────────
-  🔹 Total HTTP Requests Sent  : {results['statistics']['requests']}
-  🔹 Unique URLs Scanned       : {results['statistics']['urls']}
-  🔹 Average Response Time     : {results['statistics']['response_time']}
-
-[+] REFERENCES & NEXT STEPS
-──────────────────────────────────────────────────────────────
-  📌 OWASP SQL Injection Prevention Guide:
-     → https://owasp.org/www-community/attacks/SQL_Injection
-  📌 Immediate Actions:
-    1. Parameterize all SQL queries
-    2. Implement strict input validation
-    3. Update database access credentials
-
-📢 Report Generated by: AegisScan - CLI Security Scanner
-🚀 Developed by: Aditya Pandey & Masood Aslam 
-──────────────────────────────────────────────────────────────"""
-        return report
-
-    def _format_xss_results(self, results):
-        # Implement XSS results formatting logic
-        pass
-
-    def _html_template(self, results):
-        # Implement HTML template generation logic
-        pass
-
-    def run_ci_scan(self):
-        cmd = [
-            "sqlmap",
-            "-u", self.target_url, 
-            "--batch",
-            "--level", str(self.depth),
-            "--output-dir=./reports",
-            "--flush-session",
-            "--format=json"
-        ]
-        subprocess.run(cmd, check=True) 
+    def _check_command_exists(self, cmd):
+        """Check if a command exists in system PATH"""
+        try:
+            subprocess.run([cmd, "--version"], 
+                          capture_output=True, 
+                          text=True)
+            return True
+        except FileNotFoundError:
+            return False
