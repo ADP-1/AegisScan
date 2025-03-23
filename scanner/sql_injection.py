@@ -31,6 +31,8 @@ class SQLiScanner:
         self.start_time = None
         self.end_time = None
         self.output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'reports')
+        # Add payload counter
+        self.payloads_tested = 0
         
         # Ensure output directory exists
         os.makedirs(self.output_dir, exist_ok=True)
@@ -75,6 +77,21 @@ class SQLiScanner:
             print(f"{Fore.GREEN}[+] SQL Injection Scan Progress:")
             print(f"{Fore.YELLOW}{'=' * 60}")
 
+            # Add signal handler for Ctrl+C
+            import signal
+            original_sigint = signal.getsignal(signal.SIGINT)
+            
+            def sigint_handler(sig, frame):
+                print(f"\n{Fore.YELLOW}[!] Scan interrupted. Generating final report...")
+                self.end_time = datetime.now()
+                result = self._parse_results()
+                report = self.generate_report(result)
+                print(report)
+                signal.signal(signal.SIGINT, original_sigint)
+                sys.exit(1)
+                
+            signal.signal(signal.SIGINT, sigint_handler)
+
             while True:
                 output_line = process.stdout.readline()
                 if output_line == '' and process.poll() is not None:
@@ -83,6 +100,10 @@ class SQLiScanner:
                 if output_line:
                     self._colorize_output(output_line.strip())
                     current_progress = self._update_progress(output_line, current_progress)
+                    # Update payload counter if a payload is detected
+                    if "[PAYLOAD]" in output_line:
+                        self.payloads_tested += 1
+                        print(f"{Fore.CYAN}[*] Payloads tested: {self.payloads_tested}", end="\r")
 
             # Process return code
             if process.returncode != 0:
@@ -190,7 +211,8 @@ class SQLiScanner:
                 },
                 "statistics": {
                     "duration": str(self.end_time - self.start_time) if self.end_time else "N/A",
-                    "requests": len(vulnerabilities)
+                    "requests": len(vulnerabilities),
+                    "payloads_tested": self.payloads_tested  # Add payloads count to statistics
                 }
             }
 
@@ -263,12 +285,13 @@ class SQLiScanner:
 ⏱️  Duration: {self.end_time - self.start_time if self.end_time else 'N/A'}
 🌐 Target: {self.target_url}
 🎲 Risk Level: {self.risk}
+🧪 Payloads Tested: {self.payloads_tested}
 ✨ Found Vulnerabilities: {len(vulnerabilities)}
 
 """
 
         if vulnerabilities:
-            report += "�� DETAILED FINDINGS\n"
+            report += " DETAILED FINDINGS\n"
             report += "═══════════════════════════════════════════════════════════════\n"
             
             for i, vuln in enumerate(vulnerabilities, 1):
@@ -293,7 +316,8 @@ class SQLiScanner:
             },
             "statistics": {
                 "duration": "0s",
-                "requests": 0
+                "requests": 0,
+                "payloads_tested": self.payloads_tested  # Include payload count even for empty results
             }
         }
 
