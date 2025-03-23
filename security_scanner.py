@@ -253,27 +253,30 @@ def attack_menu(target):
                 # Run the scan
                 try:
                     results = scanner.run_scan()
-                    if results:
-                        if "error" in results:
-                            print(f"\n❌ Scan Error: {results['error']}")
-                        else:
-                            # Format results directly instead of using generate_report
-                            last_results = f"""
-[+] SQL INJECTION SCAN RESULTS
-───────────────────────────────────────────────
-Found Vulnerabilities: {len(results.get('vulnerabilities', {}).get('SQLi', []))}
-Target URL: {target}
-───────────────────────────────────────────────"""
-                            print("\n" + last_results)
-                    else:
-                        print("\n❌ No vulnerabilities found")
+                    # Results and final report are now handled directly by the scanner 
+                    # Let the user know they can continue
+                    input("\nPress Enter to continue...")
+                except KeyboardInterrupt:
+                    # The scanner handles its own interrupt
+                    input("\nPress Enter to continue...")
                 except Exception as e:
                     print(f"\n❌ Error during scan: {str(e)}")
+                    input("\nPress Enter to continue...")
+            
+            elif choice == '2':
+                # XSS Scanner
+                scanner = XSSScanner(target)
                 
+                print("\n🚀 Starting XSS scan...")
+                print("This may take several minutes. Press Ctrl+C to cancel.\n")
+                
+                try:
+                    results = scanner.run_scan()
+                    print("\n✅ XSS Scan completed!")
+                except Exception as e:
+                    print(f"\n❌ Error during scan: {str(e)}")
+                    
                 input("\nPress Enter to continue...")
-                
-            elif choice == '2': 
-                execute_security_scan("XSS", target)
             elif choice == '3':
                 execute_security_scan("CSRF", target)
             elif choice == '4':
