@@ -265,7 +265,8 @@ def attack_menu(target):
             
             elif choice == '2':
                 # XSS Scanner
-                scanner = XSSScanner(target)
+                progress = ProgressHandler()
+                scanner = XSSScanner(target, progress)
                 
                 print("\n🚀 Starting XSS scan...")
                 print("This may take several minutes. Press Ctrl+C to cancel.\n")
@@ -273,6 +274,10 @@ def attack_menu(target):
                 try:
                     results = scanner.run_scan()
                     print("\n✅ XSS Scan completed!")
+                    if results and isinstance(results, dict) and 'scan_summary' in results:
+                        print(f"\nFound {results['scan_summary']['vulnerabilities']} XSS vulnerabilities")
+                        for finding in results.get('findings', []):
+                            print(f"- {finding['details']}")
                 except Exception as e:
                     print(f"\n❌ Error during scan: {str(e)}")
                     
