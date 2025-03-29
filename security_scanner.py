@@ -10,6 +10,8 @@ from queue import Queue
 import shutil
 from utils.progress import ProgressHandler
 import logging
+from colorama import Fore, Style
+from datetime import datetime
 
 # Add after imports
 logging.basicConfig(
@@ -272,16 +274,61 @@ def attack_menu(target):
                 print("This may take several minutes. Press Ctrl+C to cancel.\n")
                 
                 try:
+                    # Clear a line for status updates
+                    print("")
+                    
+                    # Run the scan
+                    start_time = time.time()
                     results = scanner.run_scan()
-                    print("\n✅ XSS Scan completed!")
+                    end_time = time.time()
+                    
+                    # Print a newline after the scan to ensure report starts on a clean line
+                    print("\n")
+                    
+                    # Generate and display the detailed report
+                    print(scanner.generate_report(results))
+                    
+                    # Display scan completion message
+                    print(f"\n✅ XSS Scan completed in {end_time - start_time:.2f} seconds!")
+                    
                     if results and isinstance(results, dict) and 'scan_summary' in results:
-                        print(f"\nFound {results['scan_summary']['vulnerabilities']} XSS vulnerabilities")
-                        for finding in results.get('findings', []):
-                            print(f"- {finding['details']}")
+                        vuln_count = results['scan_summary'].get('vulnerabilities', 0)
+                        if vuln_count > 0:
+                            print(f"\n{Fore.RED}⚠️  {vuln_count} XSS vulnerabilities found!{Style.RESET_ALL}")
+                        else:
+                            print(f"\n{Fore.GREEN}✓ No XSS vulnerabilities found.{Style.RESET_ALL}")
+                
+                except KeyboardInterrupt:
+                    # Handle user interruption
+                    print("\n\n⚠️  Scan interrupted by user.")
+                    
+                    # Try to generate a partial report if possible
+                    try:
+                        if hasattr(scanner, 'generate_report'):
+                            partial_results = {
+                                "scan_summary": {
+                                    "target": target,
+                                    "vulnerabilities": 0,
+                                    "severity": "Unknown",
+                                    "payloads_tested": getattr(scanner, 'payloads_tested', 0)
+                                },
+                                "scan_timing": {
+                                    "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "duration": str(datetime.now() - getattr(scanner, 'start_time', datetime.now()))
+                                },
+                                "findings": [],
+                                "interrupted": True
+                            }
+                            print("\n" + scanner.generate_report(partial_results))
+                    except Exception as e:
+                        logging.error(f"Error generating partial report: {str(e)}")
+                
                 except Exception as e:
                     print(f"\n❌ Error during scan: {str(e)}")
                     
                 input("\nPress Enter to continue...")
+            
             elif choice == '3':
                 execute_security_scan("CSRF", target)
             elif choice == '4':

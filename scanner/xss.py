@@ -9,34 +9,27 @@ import json
 import tempfile
 import requests
 from urllib.parse import urlparse, parse_qs, urljoin
+from datetime import datetime
+import shutil
+from colorama import Fore, Style, init
+
+# Initialize colorama for cross-platform colored output
+init(autoreset=True)
 
 class XSSScanner:
     def __init__(self, target_url, progress_handler=None):
         self.target_url = target_url
         self.progress_handler = progress_handler
+        self.payloads_tested = 0
+        self.start_time = None
+        self.end_time = None
+        self.scan_interrupted = False
+        self.terminal_width = shutil.get_terminal_size().columns
+        self.status_message = "Initializing scan..."
+        self.current_phase = "Setup"
         
-    def run_scan(self):
-        """Run XSS scan against the target URL"""
-        logging.debug(f"Starting XSS scan against {self.target_url}")
-        
-        # First perform our own direct testing on common parameters
-        basic_results = self._perform_basic_xss_check()
-        
-        # Then use XSStrike for more advanced detection
-        xsstrike_results = self._run_xsstrike_subprocess()
-        
-        # Combine results
-        return self._combine_results(basic_results, xsstrike_results)
-    
-    def _perform_basic_xss_check(self):
-        """Perform direct XSS testing on common parameters and forms"""
-        if self.progress_handler:
-            self.progress_handler.update_progress(10)
-            
-        print("Performing quick XSS checks...")
-        
-        # Test vectors from real-world examples
-        xss_payloads = [
+        # Add XSS payloads here for easy reference
+        self.xss_payloads = [
             '<script>alert("XSS")</script>',
             '<img src=x onerror=alert("XSS")>',
             '"><script>alert("XSS")</script>',
@@ -51,26 +44,163 @@ class XSSScanner:
             '<a href="javascript:alert(\'XSS\')">Click me</a>'
         ]
         
+    def run_scan(self):
+        """Run XSS scan against the target URL"""
+        self.start_time = datetime.now()
+        self.update_status(f"🚀 Initiating XSS scan on {self.target_url}...", "Initialization")
+        logging.debug(f"Starting XSS scan against {self.target_url}")
+        
+        try:
+            # First perform our own direct testing on common parameters
+            self.update_status("Starting basic parameter testing...", "Basic Testing")
+            basic_results = self._perform_basic_xss_check()
+            
+            # Then use XSStrike for more advanced detection
+            self.update_status("Preparing for advanced XSS detection...", "Advanced Testing")
+            xsstrike_results = self._run_xsstrike_subprocess()
+            
+            # Combine results
+            self.update_status("Generating final report...", "Reporting")
+            results = self._combine_results(basic_results, xsstrike_results)
+            
+            # Record end time and add timing information
+            self.end_time = datetime.now()
+            results["scan_timing"] = {
+                "start_time": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "end_time": self.end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "duration": str(self.end_time - self.start_time)
+            }
+            
+            return results
+            
+        except KeyboardInterrupt:
+            self.scan_interrupted = True
+            self.end_time = datetime.now()
+            self.update_status("Scan interrupted by user. Generating partial report...", "Interrupted")
+            
+            # Create a partial report with collected data so far
+            partial_results = {
+                "scan_summary": {
+                    "target": self.target_url,
+                    "status": "Interrupted",
+                    "payloads_tested": self.payloads_tested,
+                    "vulnerabilities": 0,
+                    "severity": "Unknown"
+                },
+                "scan_timing": {
+                    "start_time": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_time": self.end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration": str(self.end_time - self.start_time)
+                },
+                "findings": [],
+                "interrupted": True
+            }
+            
+            return partial_results
+            
+        except Exception as e:
+            self.end_time = datetime.now()
+            logging.error(f"Error during XSS scan: {str(e)}")
+            return {
+                "error": str(e),
+                "scan_summary": {
+                    "target": self.target_url,
+                    "status": "Error",
+                    "vulnerabilities": 0
+                },
+                "scan_timing": {
+                    "start_time": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_time": self.end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration": str(self.end_time - self.start_time)
+                }
+            }
+    
+    def update_status(self, message, phase=None):
+        """Update the current status message and optionally the phase"""
+        self.status_message = message
+        if phase:
+            self.current_phase = phase
+            
+        # Update progress handler if available
+        if self.progress_handler:
+            # Map phases to approximate progress percentages
+            phase_progress = {
+                "Initialization": 5,
+                "Setup": 10,
+                "Basic Testing": 30,
+                "Advanced Testing": 60,
+                "Analysis": 80,
+                "Reporting": 95,
+                "Completed": 100,
+                "Interrupted": 100
+            }
+            
+            progress = phase_progress.get(self.current_phase, 50)
+            self.progress_handler.update_progress(progress)
+            
+        # Print status with color and formatting
+        self._print_status_line()
+    
+    def _print_status_line(self):
+        """Print status line with dynamic progress indicator"""
+        # Get current terminal width to format the message nicely
+        term_width = self.terminal_width
+        
+        # Create a progress bar based on payloads tested
+        if self.payloads_tested > 0:
+            bar_length = min(20, term_width - 50)  # Ensure bar fits in terminal
+            progress_ratio = min(1.0, self.payloads_tested / len(self.xss_payloads))
+            bar = f"[{'█' * int(bar_length * progress_ratio)}{' ' * (bar_length - int(bar_length * progress_ratio))}]"
+            progress_text = f"{Fore.CYAN}{bar} {int(progress_ratio * 100)}%{Style.RESET_ALL}"
+        else:
+            progress_text = f"{Fore.CYAN}[Initializing...]{Style.RESET_ALL}"
+        
+        # Format phase with bold and color
+        phase_text = f"{Fore.GREEN}{Style.BRIGHT}[{self.current_phase}]{Style.RESET_ALL}"
+        
+        # Format the full status message
+        status_text = f"{phase_text} {Fore.WHITE}{self.status_message}{Style.RESET_ALL} {progress_text}"
+        
+        # Ensure the status message fits within the terminal
+        if len(status_text) > term_width - 5:
+            status_text = status_text[:term_width - 8] + "..."
+            
+        # Print the status, overwriting the current line
+        sys.stdout.write(f"\r{status_text}{' ' * (term_width - len(status_text) - 1)}")
+        sys.stdout.flush()
+        
+    def _perform_basic_xss_check(self):
+        """Perform direct XSS testing on common parameters and forms"""
+        if self.progress_handler:
+            self.progress_handler.update_progress(10)
+            
+        self.update_status("Starting quick XSS vulnerability checks...", "Basic Testing")
+        
         vulnerabilities = []
         tried_params = set()
         
         try:
             # Step 1: Check if target URL has GET parameters
+            self.update_status("Analyzing URL parameters...", "Basic Testing")
             parsed_url = urlparse(self.target_url)
             query_params = parse_qs(parsed_url.query)
             
             # If we have query parameters, test them directly
             if query_params:
+                self.update_status(f"Testing {len(query_params)} URL parameters...", "Basic Testing")
                 for param_name, param_values in query_params.items():
                     tried_params.add(param_name)
                     
                     # Try a few common payloads
-                    for payload in xss_payloads[:3]:  # Test first 3 payloads
+                    for i, payload in enumerate(self.xss_payloads[:3]):  # Test first 3 payloads
+                        self.payloads_tested += 1
+                        self.update_status(f"Testing parameter '{param_name}' with payload {i+1}/3...", "Basic Testing")
                         test_url = self._replace_param_value(self.target_url, param_name, payload)
                         
                         try:
                             response = requests.get(test_url, timeout=10)
                             if payload in response.text:
+                                self.update_status(f"🔴 Vulnerability found in parameter '{param_name}'!", "Basic Testing")
                                 vulnerabilities.append({
                                     "type": "XSS",
                                     "severity": "High",
@@ -84,6 +214,7 @@ class XSSScanner:
             
             # Step 2: Find and test forms
             try:
+                self.update_status("Searching for HTML forms...", "Basic Testing")
                 response = requests.get(self.target_url, timeout=10)
                 
                 # Find all input fields in forms
@@ -106,19 +237,26 @@ class XSSScanner:
                     form_urls.append(self.target_url)
                 
                 # Test each input field with each payload
+                if input_matches:
+                    self.update_status(f"Testing {len(input_matches)} form input fields...", "Basic Testing")
+                
                 for input_name in input_matches:
                     if input_name in tried_params:
                         continue  # Skip params we already tested
                         
                     tried_params.add(input_name)
                     for form_url in form_urls:
-                        for payload in xss_payloads[:5]:  # Test first 5 payloads
+                        for i, payload in enumerate(self.xss_payloads[:5]):  # Test first 5 payloads
+                            self.payloads_tested += 1
+                            self.update_status(f"Testing form input '{input_name}' with payload {i+1}/5...", "Basic Testing")
+                            
                             try:
                                 # Try with POST
                                 data = {input_name: payload}
                                 response = requests.post(form_url, data=data, timeout=10, allow_redirects=True)
                                 
                                 if payload in response.text:
+                                    self.update_status(f"🔴 Vulnerability found in form input '{input_name}'!", "Basic Testing")
                                     vulnerabilities.append({
                                         "type": "XSS",
                                         "severity": "High",
@@ -132,6 +270,7 @@ class XSSScanner:
                                 response = requests.get(test_url, timeout=10)
                                 
                                 if payload in response.text:
+                                    self.update_status(f"🔴 Vulnerability found in form input '{input_name}'!", "Basic Testing")
                                     vulnerabilities.append({
                                         "type": "XSS",
                                         "severity": "High",
@@ -143,15 +282,21 @@ class XSSScanner:
                                 logging.error(f"Error testing form input {input_name}: {str(e)}")
                 
                 # Specifically look for a search box (the one user mentioned)
+                self.update_status("Looking for searchFor parameter...", "Basic Testing")
                 search_box_pattern = r'<input[^>]*name=["\']searchFor["\'][^>]*>'
                 if re.search(search_box_pattern, response.text):
-                    for payload in xss_payloads[:8]:  # Test more payloads for search box
+                    self.update_status("Found searchFor parameter. Testing for XSS...", "Basic Testing")
+                    for i, payload in enumerate(self.xss_payloads[:8]):  # Test more payloads for search box
+                        self.payloads_tested += 1
+                        self.update_status(f"Testing searchFor with payload {i+1}/8...", "Basic Testing")
+                        
                         try:
                             # Try direct post to the URL with the search parameter
                             data = {"searchFor": payload}
                             response = requests.post(self.target_url, data=data, timeout=10)
                             
                             if payload in response.text:
+                                self.update_status(f"🔴 Vulnerability found in searchFor parameter!", "Basic Testing")
                                 vulnerabilities.append({
                                     "type": "XSS",
                                     "severity": "High",
@@ -168,6 +313,7 @@ class XSSScanner:
                                 try:
                                     response = requests.get(test_url, timeout=5)
                                     if payload in response.text:
+                                        self.update_status(f"🔴 Vulnerability found in searchFor parameter at {endpoint}!", "Basic Testing")
                                         vulnerabilities.append({
                                             "type": "XSS",
                                             "severity": "High",
@@ -182,18 +328,23 @@ class XSSScanner:
                 
             except Exception as e:
                 logging.error(f"Error finding forms: {str(e)}")
+                self.update_status(f"Error during form analysis: {str(e)}", "Basic Testing")
                 
         except Exception as e:
             logging.error(f"Error in basic XSS check: {str(e)}")
+            self.update_status(f"Error during basic XSS checks: {str(e)}", "Basic Testing")
             
         if self.progress_handler:
             self.progress_handler.update_progress(30)
             
+        self.update_status(f"Basic testing completed. Found {len(vulnerabilities)} vulnerabilities.", "Basic Testing")
+        
         return {
             "scan_summary": {
                 "target": self.target_url,
                 "vulnerabilities": len(vulnerabilities),
-                "severity": "High" if vulnerabilities else "None"
+                "severity": "High" if vulnerabilities else "None",
+                "payloads_tested": self.payloads_tested
             },
             "findings": vulnerabilities
         }
@@ -548,4 +699,86 @@ class XSSScanner:
                 "severity": severity
             },
             "findings": combined_findings
-        } 
+        }
+
+    def generate_report(self, results):
+        """Generate a comprehensive XSS scan report"""
+        if "error" in results:
+            return f"\n❌ XSS Scan failed: {results['error']}"
+
+        # Extract scan summary information
+        scan_summary = results.get("scan_summary", {})
+        timing_info = results.get("scan_timing", {})
+        findings = results.get("findings", [])
+        interrupted = results.get("interrupted", False)
+        
+        # Define severity colors for console output
+        severity_colors = {
+            "High": f"{Fore.RED}{Style.BRIGHT}",
+            "Medium": f"{Fore.YELLOW}{Style.BRIGHT}",
+            "Low": f"{Fore.GREEN}",
+            "None": f"{Fore.BLUE}",
+            "Unknown": f"{Fore.MAGENTA}"
+        }
+        
+        # Determine overall severity
+        severity = scan_summary.get("severity", "Unknown")
+        severity_color = severity_colors.get(severity, "")
+        
+        # Format header
+        report = f"""
+{Fore.CYAN}{Style.BRIGHT}╔══════════════════════════════════════════════════════════════╗
+║                       XSS SCAN REPORT                        ║
+╚══════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+
+{Fore.WHITE}{Style.BRIGHT}📋 SCAN SUMMARY{Style.RESET_ALL}
+{Fore.CYAN}────────────────────────────────────────────────────────────────{Style.RESET_ALL}
+{Fore.WHITE}🌐 Target:{Style.RESET_ALL} {scan_summary.get('target', 'Unknown')}
+{Fore.WHITE}📊 Status:{Style.RESET_ALL} {"⚠️  Interrupted" if interrupted else "✅ Completed"}
+{Fore.WHITE}⏱️  Started:{Style.RESET_ALL} {timing_info.get('start_time', 'Unknown')}
+{Fore.WHITE}⌛ Duration:{Style.RESET_ALL} {timing_info.get('duration', 'Unknown')}
+{Fore.WHITE}🧪 Payloads Tested:{Style.RESET_ALL} {scan_summary.get('payloads_tested', 0)}
+{Fore.WHITE}✨ Vulnerabilities Found:{Style.RESET_ALL} {scan_summary.get('vulnerabilities', 0)}
+{Fore.WHITE}🚨 Overall Severity:{Style.RESET_ALL} {severity_color}{severity}{Style.RESET_ALL}
+"""
+
+        # Add findings section if vulnerabilities exist
+        if findings:
+            report += f"""
+{Fore.WHITE}{Style.BRIGHT}🔍 DETAILED FINDINGS{Style.RESET_ALL}
+{Fore.CYAN}────────────────────────────────────────────────────────────────{Style.RESET_ALL}
+"""
+            
+            for i, finding in enumerate(findings, 1):
+                finding_severity = finding.get('severity', 'Unknown')
+                severity_color = severity_colors.get(finding_severity, "")
+                
+                report += f"\n{i}. {severity_color}[{finding_severity}]{Style.RESET_ALL} {finding.get('type', 'Unknown')}\n"
+                
+                if 'parameter' in finding:
+                    report += f"   {Fore.YELLOW}Parameter:{Style.RESET_ALL} {finding.get('parameter', 'N/A')}\n"
+                    
+                report += f"   {Fore.YELLOW}Details:{Style.RESET_ALL} {finding.get('details', 'N/A')}\n"
+                
+        else:
+            report += f"\n{Fore.GREEN}ℹ️  No XSS vulnerabilities were found{Style.RESET_ALL}\n"
+        
+        # Add recommendations section
+        report += f"""
+{Fore.WHITE}{Style.BRIGHT}🛡️ RECOMMENDATIONS{Style.RESET_ALL}
+{Fore.CYAN}────────────────────────────────────────────────────────────────{Style.RESET_ALL}
+"""
+        
+        if findings:
+            report += f"""{Fore.YELLOW}• Fix all identified vulnerabilities by implementing proper output encoding.
+• Validate and sanitize all user inputs.
+• Consider implementing a Content Security Policy (CSP).
+• Use modern frameworks that automatically escape output.{Style.RESET_ALL}
+"""
+        else:
+            report += f"{Fore.GREEN}• Continue to maintain current security practices.{Style.RESET_ALL}\n"
+        
+        # Add footer
+        report += f"\n{Fore.CYAN}────────────────────────────────────────────────────────────────{Style.RESET_ALL}"
+        
+        return report 
