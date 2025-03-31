@@ -47,3 +47,7 @@ dist/
 build/
 *.exe
 *.spec 
+
+scanner/sqlmap/
+scanner/xsstrike/
+
