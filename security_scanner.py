@@ -1,5 +1,6 @@
 import argparse
-from scanner import SQLiScanner, XSSScanner, CSRFAnalyzer
+from scanner import SQLiScanner, XSSScanner
+from scanner.csrf import CSRFScanner  # Import our new CSRFScanner directly
 from reports import ReportGenerator
 import sys
 import os
@@ -39,33 +40,54 @@ def main():
         parser.add_argument('-u', '--url', required=True, help='Target URL to scan')
         parser.add_argument('--depth', type=int, default=3, help='Scan depth (1-5)')
         parser.add_argument('--sqlmap', action='store_true', help='Run SQL injection tests')
+        parser.add_argument('--xss', action='store_true', help='Run XSS tests')
+        parser.add_argument('--csrf', action='store_true', help='Run CSRF tests')  # Add CSRF flag
+        parser.add_argument('--all', action='store_true', help='Run all security tests')
         parser.add_argument('-o', '--output', help='Output file for the report')
         parser.add_argument('-f', '--format', help='Output format for the report')
         # ... add other arguments from PRD §3.1 ...
-        
+
         args = parser.parse_args()
         
-        if args.sqlmap:
-            sqli_scanner = SQLiScanner(args.url, args.depth)
-            sqli_scanner.run_scan()
+        # If no scan type specified, default to all
+        if not (args.sqlmap or args.xss or args.csrf or args.all):
+            args.all = True
+            
+        # Run scans based on arguments
+        results = {}
         
-        # ... implement other scan types ...
+        if args.sqlmap or args.all:
+            print(f"\n{Fore.CYAN}[*] Running SQL Injection scan...{Style.RESET_ALL}")
+            sqli_results = execute_security_scan("SQLi", args.url)
+            if sqli_results:
+                results["SQLi"] = sqli_results
+                
+        if args.xss or args.all:
+            print(f"\n{Fore.CYAN}[*] Running XSS scan...{Style.RESET_ALL}")
+            xss_results = execute_security_scan("XSS", args.url)
+            if xss_results:
+                results["XSS"] = xss_results
+                
+        if args.csrf or args.all:
+            print(f"\n{Fore.CYAN}[*] Running CSRF scan...{Style.RESET_ALL}")
+            csrf_results = execute_security_scan("CSRF", args.url)
+            if csrf_results:
+                results["CSRF"] = csrf_results
         
-        results = {
-            'target': args.url,
-            'vulnerabilities': {
-                'SQLi': [], 
-                'XSS': [],
-                'CSRF': []
-            }
-        }
-        
-        if args.output:
-            reporter = ReportGenerator()
-            report = reporter.generate(args.format, results)
-            with open(args.output, 'w') as f:
-                f.write(report)
+        # Generate report
+        if results:
+            report_format = args.format or "txt"
+            output_file = args.output or f"aegisscan_report_{int(time.time())}.{report_format}"
+            
+            report_gen = ReportGenerator(results, args.url)
+            report_gen.generate_report(output_file, report_format)
+            
+            print(f"\n{Fore.GREEN}✅ Scan completed! Report saved to: {output_file}{Style.RESET_ALL}")
+        else:
+            print(f"\n{Fore.RED}❌ No scan results were generated.{Style.RESET_ALL}")
+            
     else:
+        # Interactive mode
         interactive_mode()
 
 def interactive_mode():
@@ -110,15 +132,21 @@ def check_tool_installed(tool_name):
         return False
 
 def run_scan_tool(scanner, progress_handler, result_queue):
+    """Run the selected security scanner and put results in queue"""
     try:
-        progress_handler.running = True
-        scanner.progress_handler = progress_handler
-        results = scanner.run_scan()
+        # Different scanners have slightly different method names
+        if isinstance(scanner, SQLiScanner):
+            results = scanner.run_scan()
+        elif isinstance(scanner, XSSScanner):
+            results = scanner.scan_target()
+        elif isinstance(scanner, CSRFScanner):  # Changed from CSRFAnalyzer to CSRFScanner
+            results = scanner.scan()
+        else:
+            results = None
+            
         result_queue.put((True, results))
     except Exception as e:
         result_queue.put((False, str(e)))
-    finally:
-        progress_handler.running = False
 
 def display_progress(handler):
     """Animated progress bar that updates in-place"""
@@ -150,7 +178,7 @@ def execute_security_scan(scan_type, target):
     required_tools = {
         "SQLi": "sqlmap",
         "XSS": "xsstrike",
-        "CSRF": "csrf-scanner"
+        # CSRF doesn't require external tools as we've implemented it directly
     }
     
     if scan_type in required_tools:
@@ -167,7 +195,16 @@ def execute_security_scan(scan_type, target):
     scanners = {
         "SQLi": SQLiScanner(target, progress),
         "XSS": XSSScanner(target),
-        "CSRF": CSRFAnalyzer(target)
+        "CSRF": CSRFScanner(target, progress_handler=progress, 
+                           config={
+                               'depth': 3,
+                               'max_forms': 100,
+                               'randomness_threshold': 0.75,
+                               'token_samples': 8,
+                               'threads': 8,
+                               'generate_poc': True,
+                               'verify_attacks': True
+                           })  # Enhanced configuration
     }
     
     if scan_type not in scanners:
@@ -190,12 +227,52 @@ def execute_security_scan(scan_type, target):
         
         # Get results
         success, output = result_queue.get()
-        scan_thread.join()
         
-        return format_scan_results(output, scan_type) if success else None
-
+        if success:
+            # Generate report for CSRF scan
+            if scan_type == "CSRF" and output:
+                # Create a timestamp-based filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                report_file = f"csrf_report_{timestamp}.html"
+                report_path = os.path.join(os.path.dirname(__file__), 'reports', report_file)
+                
+                # Ensure reports directory exists
+                os.makedirs(os.path.dirname(report_path), exist_ok=True)
+                
+                # Generate the report
+                report_gen = ReportGenerator({"CSRF": output}, target)
+                report_path = report_gen.generate_report(report_path, "html")
+                
+                print(f"\n{Fore.GREEN}✅ CSRF scan completed! Found {len(output)} vulnerabilities.{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}📊 Report saved to: {report_path}{Style.RESET_ALL}")
+                
+                # Display summary of findings
+                if output:
+                    severity_counts = {"High": 0, "Medium": 0, "Low": 0}
+                    for vuln in output:
+                        severity = vuln.get('severity', 'Unknown')
+                        if severity in severity_counts:
+                            severity_counts[severity] += 1
+                    
+                    print(f"\n{Fore.YELLOW}📋 Vulnerability Summary:{Style.RESET_ALL}")
+                    print(f"   {Fore.RED}High: {severity_counts['High']}{Style.RESET_ALL}")
+                    print(f"   {Fore.YELLOW}Medium: {severity_counts['Medium']}{Style.RESET_ALL}")
+                    print(f"   {Fore.BLUE}Low: {severity_counts['Low']}{Style.RESET_ALL}")
+                    
+                    # Show sample of high severity findings
+                    high_severity = [v for v in output if v.get('severity') == 'High']
+                    if high_severity:
+                        print(f"\n{Fore.RED}⚠️ High Severity Findings Sample:{Style.RESET_ALL}")
+                        for i, vuln in enumerate(high_severity[:3]):  # Show up to 3 examples
+                            print(f"   {i+1}. {vuln.get('url', 'Unknown URL')} - {', '.join(vuln.get('type', []))}")
+            
+            return output
+        else:
+            print(f"\n❌ {scan_type} scan failed: {output}")
+            return None
+            
     except Exception as e:
-        handle_scan_errors(str(e))
+        print(f"\n❌ Error during {scan_type} scan: {str(e)}")
         return None
 
 def format_scan_results(raw_output, scan_type):
@@ -330,7 +407,67 @@ def attack_menu(target):
                 input("\nPress Enter to continue...")
             
             elif choice == '3':
-                execute_security_scan("CSRF", target)
+                # Enhanced CSRF scan with detailed configuration
+                print("\n🚀 Starting CSRF scan...")
+                print("This may take several minutes. Press Ctrl+C to cancel.\n")
+                
+                try:
+                    # Configure the CSRF scanner with enhanced options
+                    progress = ProgressHandler()
+                    csrf_scanner = CSRFScanner(
+                        target, 
+                        progress_handler=progress,
+                        config={
+                            'depth': 3,
+                            'max_forms': 100,
+                            'randomness_threshold': 0.75,
+                            'token_samples': 8,
+                            'threads': 8,
+                            'generate_poc': True,
+                            'verify_attacks': True
+                        }
+                    )
+                    
+                    # Run the scan
+                    results = csrf_scanner.scan()
+                    
+                    # Generate report
+                    if results:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        report_file = f"csrf_report_{timestamp}.html"
+                        report_path = os.path.join(os.path.dirname(__file__), 'reports', report_file)
+                        
+                        # Ensure reports directory exists
+                        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+                        
+                        # Generate the report
+                        report_gen = ReportGenerator({"CSRF": results}, target)
+                        report_path = report_gen.generate_report(report_path, "html")
+                        
+                        print(f"\n{Fore.GREEN}✅ CSRF scan completed! Found {len(results)} vulnerabilities.{Style.RESET_ALL}")
+                        print(f"{Fore.GREEN}📊 Report saved to: {report_path}{Style.RESET_ALL}")
+                        
+                        # Display summary of findings
+                        severity_counts = {"High": 0, "Medium": 0, "Low": 0}
+                        for vuln in results:
+                            severity = vuln.get('severity', 'Unknown')
+                            if severity in severity_counts:
+                                severity_counts[severity] += 1
+                        
+                        print(f"\n{Fore.YELLOW}📋 Vulnerability Summary:{Style.RESET_ALL}")
+                        print(f"   {Fore.RED}High: {severity_counts['High']}{Style.RESET_ALL}")
+                        print(f"   {Fore.YELLOW}Medium: {severity_counts['Medium']}{Style.RESET_ALL}")
+                        print(f"   {Fore.BLUE}Low: {severity_counts['Low']}{Style.RESET_ALL}")
+                    else:
+                        print(f"\n{Fore.GREEN}✅ CSRF scan completed! No vulnerabilities found.{Style.RESET_ALL}")
+                
+                except KeyboardInterrupt:
+                    print("\n\n⚠️  Scan interrupted by user.")
+                except Exception as e:
+                    print(f"\n❌ Error during CSRF scan: {str(e)}")
+                
+                input("\nPress Enter to continue...")
+            
             elif choice == '4':
                 run_all_scans(target)
             elif choice == '5':
@@ -423,4 +560,4 @@ def run_all_scans(target):
         run_scan(scanner(target))
 
 if __name__ == "__main__":
-    main() 
+    main()
