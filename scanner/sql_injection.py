@@ -1,20 +1,25 @@
 import subprocess
-import json
 import re
 import os
 import time
 import logging
 from datetime import datetime
-from utils.progress import ProgressHandler
 import sys
-from colorama import init, Fore, Back, Style
+import signal
 import shutil
+from colorama import init, Fore, Style
+import validators
+import threading
 
-# Initialize colorama for cross-platform colored output
+# Initialize colorama for colored output
 init(autoreset=True)
 
-# Create logs directory if it doesn't exist
-log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
+# Global lock for thread-safe printing
+print_lock = threading.Lock()
+
+# Define base directories
+base_dir = os.path.dirname(os.path.abspath(__file__))
+log_dir = os.path.join(base_dir, 'logs')
 os.makedirs(log_dir, exist_ok=True)
 
 logging.basicConfig(
@@ -24,58 +29,43 @@ logging.basicConfig(
 )
 
 class SQLiScanner:
-    def __init__(self, target_url, progress_handler=None, depth=3, risk=1):
+    def __init__(self, target_url, progress_handler=None, depth=3, risk=1, custom_query=None):
+        if not validators.url(target_url):
+            raise ValueError("Invalid URL provided.")
         self.target_url = target_url
         self.depth = depth
         self.risk = risk
         self.progress_handler = progress_handler
+        self.custom_query = custom_query  # Optional custom SQL query
         self.start_time = None
         self.end_time = None
-        self.output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'reports')
-        # Add payload counter
         self.payloads_tested = 0
-        self.terminal_width = shutil.get_terminal_size().columns
-        self.terminal_height = shutil.get_terminal_size().lines
-        self.status_message = "Initializing scan..."
-        self.last_status_update = time.time()
-        self.estimated_time = "calculating..."
-        
-        # Ensure output directory exists
+        self.progress = 0  # Progress percentage (0-100)
+        self.output_dir = os.path.join(base_dir, 'reports')
         os.makedirs(self.output_dir, exist_ok=True)
+        # Get terminal dimensions (with fallbacks)
+        try:
+            dims = shutil.get_terminal_size()
+            self.terminal_width = dims.columns
+            self.terminal_height = dims.lines
+        except Exception:
+            self.terminal_width = 80
+            self.terminal_height = 24
 
     def run_scan(self):
-        """Runs SQLMap scan on the target URL"""
         try:
             self.start_time = datetime.now()
-            
-            # Clear terminal and set up display
-            self._clear_terminal()
-            self._print_header()
+            with print_lock:
+                print("🚀 Starting SQL Injection scan...")
+                print("This may take several minutes. Press Ctrl+C to cancel.\n")
+                print(f"[*] Starting SQL injection scan")
+                print(f"[*] Target: {self.target_url}")
+                if self.custom_query:
+                    print(f"[*] Using custom SQL query: {self.custom_query}")
+                print("[*] Starting SQLMap process...")
 
-            # Direct SQLMap command execution
-            cmd = [
-                "sqlmap",
-                "-u", self.target_url,
-                "--batch",
-                "--random-agent",
-                "--level", str(self.depth),
-                "--risk", str(self.risk),
-                "--output-dir", self.output_dir,
-                "--flush-session",
-                "--threads=10",  # Increased threads for faster scanning
-                "--timeout=30",
-                "--retries=3",
-                "--keep-alive",
-                "--technique=BEUSTQ",
-                "--tamper=space2comment,between",
-                "-v", "3"
-            ]
-
-            # Update status
-            self.status_message = "Starting SQLMap process..."
-            self._update_status_bar(0)
-
-            # Start SQLMap process
+            cmd = self._build_sqlmap_command()
+            logging.info("Executing command: %s", " ".join(cmd))
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -84,253 +74,171 @@ class SQLiScanner:
                 bufsize=1
             )
 
-            # Initialize payload display area
-            payload_display_height = self.terminal_height - 7  # Reserve space for header and status bar
-            payload_lines = ["" for _ in range(payload_display_height)]
-            current_progress = 0
-            
-            # Add signal handler for Ctrl+C
-            import signal
+            # Event for signaling thread termination
+            termination_event = threading.Event()
+
+            # Start the progress updater thread
+            progress_thread = threading.Thread(target=self.progress_bar_updater, args=(termination_event,))
+            progress_thread.daemon = True
+            progress_thread.start()
+
+            # Set up SIGINT handler for graceful interruption
             original_sigint = signal.getsignal(signal.SIGINT)
-            
-            def sigint_handler(sig, frame):
-                self._move_cursor_to_status_bar()
-                print(f"\n{Fore.YELLOW}[!] Scan interrupted. Generating final report...")
-                self.end_time = datetime.now()
-                result = self._parse_results()
-                report = self.generate_report(result)
-                print(report)
-                signal.signal(signal.SIGINT, original_sigint)
-                sys.exit(1)
-                
-            signal.signal(signal.SIGINT, sigint_handler)
+            signal.signal(signal.SIGINT, self._sigint_handler(original_sigint, process, termination_event))
 
-            # Display initial interface
-            self._update_status_bar(0)
+            # Start the output reader thread
+            reader_thread = threading.Thread(target=self.read_output, args=(process, termination_event))
+            reader_thread.start()
 
-            while True:
-                output_line = process.stdout.readline()
-                if output_line == '' and process.poll() is not None:
-                    break
-                
-                if output_line:
-                    output_line = output_line.strip()
-                    
-                    # Update progress based on output content
-                    current_progress = self._calculate_progress(output_line, current_progress)
-                    
-                    # Update payload counter if a payload is detected
-                    if "[PAYLOAD]" in output_line:
-                        self.payloads_tested += 1
-                        self.status_message = f"Testing payload #{self.payloads_tested}..."
-                        
-                        # Format the payload line for display
-                        timestamp = datetime.now().strftime("%H:%M:%S")
-                        payload_line = f"{Fore.BLUE}[{timestamp}] {Fore.YELLOW}[PAYLOAD #{self.payloads_tested}] {Fore.WHITE}{self._format_payload(output_line)}"
-                        
-                        # Add new payload to display and shift older ones up
-                        payload_lines.pop(0)
-                        payload_lines.append(payload_line)
-                    
-                    # Update progress status based on other output patterns
-                    elif "testing " in output_line.lower():
-                        self.status_message = f"Testing: {output_line}"
-                    elif "warning" in output_line.lower():
-                        payload_lines.pop(0)
-                        payload_lines.append(f"{Fore.YELLOW}[WARNING] {output_line}")
-                    elif "info" in output_line.lower():
-                        self.status_message = f"Info: {output_line}"
-                    
-                    # Update the display
-                    self._update_payload_display(payload_lines)
-                    self._update_status_bar(current_progress)
-
-            # Process return code
-            if process.returncode != 0:
-                self._move_cursor_to_status_bar()
-                print(f"\n{Fore.RED}[!] SQLMap process failed with code {process.returncode}")
-                return {"error": "Scan failed"}
-
+            # Wait for output processing to finish
+            reader_thread.join()
+            termination_event.set()
+            progress_thread.join()
+            process.wait()
             self.end_time = datetime.now()
-            self._move_cursor_to_status_bar()
-            print(f"\n{Fore.GREEN}[✓] Scan Completed!")
-            return self._parse_results()
+
+            with print_lock:
+                print("[*] SQL injection scan completed.")
+
+            results = self._parse_results()
+            final_report = self.generate_report(results)
+            with print_lock:
+                print(final_report)
+
+            return results
 
         except Exception as e:
-            self._move_cursor_to_status_bar()
-            print(f"\n{Fore.RED}[!] Error during scan: {str(e)}")
+            with print_lock:
+                print(f"{Fore.RED}[!] Error during scan: {str(e)}")
+            logging.error("Error during scan: %s", str(e))
             return {"error": str(e)}
 
-    def _clear_terminal(self):
-        """Clear terminal for fresh display"""
-        os.system('cls' if os.name == 'nt' else 'clear')
+    def progress_bar_updater(self, termination_event):
+        """
+        Periodically updates the progress bar at the bottom of the terminal.
+        It saves the current cursor position, moves to the bottom, prints the progress bar,
+        and then restores the cursor.
+        """
+        while not termination_event.is_set():
+            with print_lock:
+                sys.stdout.write("\033[s")  # Save current cursor position
+                sys.stdout.write(f"\033[{self.terminal_height};0H")  # Move to bottom line
+                bar_width = max(self.terminal_width - 30, 10)
+                filled_width = int(bar_width * self.progress / 100)
+                bar = f"{'█' * filled_width}{'░' * (bar_width - filled_width)}"
+                progress_line = f"[{datetime.now().strftime('%H:%M:%S')}] Progress: {self.progress:3d}% [{bar}]"
+                sys.stdout.write(progress_line.ljust(self.terminal_width))
+                sys.stdout.write("\033[u")  # Restore saved cursor position
+                sys.stdout.flush()
+            time.sleep(1)
 
-    def _print_header(self):
-        """Print the scanner header"""
-        header = f"""
-{Fore.CYAN}╔{'═' * (self.terminal_width - 2)}╗
-{Fore.CYAN}║ {Fore.WHITE}SQL INJECTION SCAN {Fore.YELLOW}• {Fore.GREEN}Target: {self.target_url}{' ' * (self.terminal_width - 47 - len(self.target_url))}{Fore.CYAN}║
-{Fore.CYAN}╚{'═' * (self.terminal_width - 2)}╝
-{Fore.WHITE}"""
-        print(header)
+    def read_output(self, process, termination_event):
+        """
+        Reads and processes each line from SQLMap's stdout.
+        Updates the progress value, prints payload lines (with timestamp and payload count)
+        and prints other log lines. Stops after reaching 120 payloads.
+        """
+        while True:
+            line = process.stdout.readline()
+            if line == '' and process.poll() is not None:
+                break
+            if line:
+                line = line.strip()
+                # Update progress based on output content
+                self.progress = self._calculate_progress(line, self.progress)
+                # Check if this line contains a payload
+                if "[PAYLOAD]" in line:
+                    if self.payloads_tested < 120:
+                        self.payloads_tested += 1
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        payload_line = f"[{timestamp}] [PAYLOAD #{self.payloads_tested}] {self._format_payload(line)}"
+                        with print_lock:
+                            print(payload_line)
+                    else:
+                        with print_lock:
+                            print("[!] Payload limit of 120 reached. Terminating scan.")
+                        process.terminate()
+                        break
+                else:
+                    with print_lock:
+                        print(f"[*] {line}")
+        termination_event.set()
+
+    def _build_sqlmap_command(self):
+        cmd = [
+            "sqlmap",
+            "-u", self.target_url,
+            "--batch",
+            "--random-agent",
+            "--level", str(self.depth),
+            "--risk", str(self.risk),
+            "--output-dir", self.output_dir,
+            "--flush-session",
+            "--threads=10",
+            "--timeout=30",
+            "--retries=3",
+            "--keep-alive",
+            "--technique=BEUSTQ",
+            "--tamper=space2comment,between",
+            "-v", "3"
+        ]
+        if self.custom_query:
+            cmd.extend(["--sql-query", self.custom_query])
+        return cmd
+
+    def _sigint_handler(self, original_handler, process, termination_event):
+        def handler(sig, frame):
+            with print_lock:
+                print(f"\n{Fore.YELLOW}[!] Scan interrupted. Terminating process and generating final report...")
+            try:
+                process.terminate()
+            except Exception as ex:
+                logging.error("Error terminating process: %s", ex)
+            self.end_time = datetime.now()
+            termination_event.set()
+            results = self._parse_results()
+            report = self.generate_report(results)
+            with print_lock:
+                print(report)
+            signal.signal(signal.SIGINT, original_handler)
+            sys.exit(1)
+        return handler
 
     def _format_payload(self, line):
-        """Format payload output for display"""
-        # Extract actual payload from sqlmap output
         if "[PAYLOAD]" in line:
-            payload = line.split("[PAYLOAD]")[1].strip()
-            # Truncate if too long for display
-            if len(payload) > self.terminal_width - 40:
-                payload = payload[:self.terminal_width - 43] + "..."
-            return payload
+            # Extract payload text after the marker
+            return line.split("[PAYLOAD]", 1)[1].strip()
         return line
 
-    def _update_payload_display(self, payload_lines):
-        """Update the payload display area"""
-        # Move cursor to payload area (after header)
-        sys.stdout.write(f"\033[4;0H")  # Move to line 4, column 0
-        
-        # Print each payload line
-        for line in payload_lines:
-            # Ensure line doesn't exceed terminal width
-            if len(line) > self.terminal_width:
-                line = line[:self.terminal_width - 3] + "..."
-            
-            # Clear the line and print the payload
-            sys.stdout.write("\033[K")  # Clear line
-            print(line)
-        
-        sys.stdout.flush()
-
-    def _move_cursor_to_status_bar(self):
-        """Move cursor to status bar position"""
-        sys.stdout.write(f"\033[{self.terminal_height-3};0H")
-        sys.stdout.flush()
-
-    def _update_status_bar(self, progress):
-        """Update the fixed status bar at the bottom of the terminal"""
-        # Calculate time metrics
-        elapsed = (datetime.now() - self.start_time).total_seconds()
-        elapsed_str = self._format_time(elapsed)
-        
-        # Update estimated time remaining every 5 seconds
-        if time.time() - self.last_status_update > 5 and progress > 0:
-            if progress < 5:  # Too early for accurate prediction
-                self.estimated_time = "calculating..."
-            else:
-                # Calculate ETA
-                total_time = elapsed * 100 / progress
-                remaining = total_time - elapsed
-                self.estimated_time = self._format_time(remaining)
-            self.last_status_update = time.time()
-        
-        # Determine progress bar color
-        if progress < 30:
-            color = Fore.BLUE
-        elif progress < 70:
-            color = Fore.YELLOW
-        else:
-            color = Fore.GREEN
-            
-        # Create the progress bar
-        bar_width = self.terminal_width - 50
-        filled_width = int(bar_width * progress / 100)
-        bar = f"{color}{'█' * filled_width}{Fore.WHITE}{'░' * (bar_width - filled_width)}"
-        
-        # Move cursor to status bar position
-        self._move_cursor_to_status_bar()
-        
-        # Draw status bar border
-        sys.stdout.write(f"{Fore.CYAN}╔{'═' * (self.terminal_width - 2)}╗\n")
-        
-        # Format and display status line
-        status_line = f"{Fore.CYAN}║ {Fore.WHITE}Progress: {color}{progress}%{Fore.WHITE} [{bar}] "
-        status_line += f"Payloads: {Fore.YELLOW}{self.payloads_tested}{Fore.WHITE} | "
-        status_line += f"Elapsed: {Fore.MAGENTA}{elapsed_str}{Fore.WHITE} | "
-        status_line += f"ETA: {Fore.CYAN}{self.estimated_time}{Fore.WHITE}"
-        
-        # Ensure status line fits terminal width
-        if len(status_line) > self.terminal_width - 3:
-            status_line = status_line[:self.terminal_width - 7] + "...{Fore.CYAN}║"
-        else:
-            status_line += " " * (self.terminal_width - len(status_line) - 3) + f"{Fore.CYAN}║"
-        
-        sys.stdout.write(status_line + "\n")
-        
-        # Draw status message line
-        message_line = f"{Fore.CYAN}║ {Fore.WHITE}{self.status_message}"
-        message_padding = self.terminal_width - len(message_line) - 3 + len(Fore.CYAN) + len(Fore.WHITE)
-        message_line += " " * message_padding + f"{Fore.CYAN}║"
-        sys.stdout.write(message_line + "\n")
-        
-        # Draw bottom border
-        sys.stdout.write(f"{Fore.CYAN}╚{'═' * (self.terminal_width - 2)}╗\n")
-        
-        sys.stdout.flush()
-
-    def _format_time(self, seconds):
-        """Format seconds into a readable time string"""
-        if seconds < 60:
-            return f"{int(seconds)}s"
-        elif seconds < 3600:
-            minutes = int(seconds / 60)
-            secs = int(seconds % 60)
-            return f"{minutes}m {secs}s"
-        else:
-            hours = int(seconds / 3600)
-            minutes = int((seconds % 3600) / 60)
-            return f"{hours}h {minutes}m"
-
     def _calculate_progress(self, line, current_progress):
-        """Calculate scan progress based on output content"""
-        # Progress indicators based on the sqlmap output
-        if "testing " in line.lower():
+        """
+        Increase the progress counter based on certain SQLMap output patterns.
+        Adjust these increments as needed.
+        """
+        line_lower = line.lower()
+        if "testing " in line_lower:
             current_progress += 2
-        elif "parameter '" in line.lower():
+        elif "parameter '" in line_lower:
             current_progress += 5
-        elif "the back-end dbms is" in line.lower():
+        elif "the back-end dbms is" in line_lower:
             current_progress += 10
-        elif "sqlmap identified" in line.lower():
+        elif "sqlmap identified" in line_lower:
             current_progress += 15
-            
-        # Update status message based on progress
-        if current_progress < 20:
-            self.status_message = "Initializing tests..."
-        elif current_progress < 40:
-            self.status_message = "Testing parameters..."
-        elif current_progress < 60:
-            self.status_message = "Refining payloads..."
-        elif current_progress < 80:
-            self.status_message = "Verifying vulnerabilities..."
-        elif current_progress < 95:
-            self.status_message = "Finalizing scan..."
-        else:
-            self.status_message = "Generating report..."
-
-        # Ensure progress stays within bounds
+        # Cap progress at 99 until the scan completes
         return min(current_progress, 99)
 
     def _parse_results(self):
-        """Parse SQLMap results with colored output"""
         try:
-            # Get target directory from URL
             target_host = self.target_url.split('//')[1].split('/')[0]
             target_dir = os.path.join(self.output_dir, target_host)
-            
             vulnerabilities = []
-            
-            # Check if target directory exists
             if not os.path.exists(target_dir):
-                logging.warning(f"No results directory found at {target_dir}")
+                logging.warning("No results directory found at %s", target_dir)
                 return self._create_empty_result()
-
-            # Parse log file
             log_file = os.path.join(target_dir, "log")
             if os.path.exists(log_file):
                 with open(log_file, 'r') as f:
                     content = f.read()
-                    
-                    # Parse vulnerabilities
                     if "might be injectable" in content:
                         vulnerabilities.append({
                             "parameter": self._extract_parameter(content),
@@ -338,8 +246,6 @@ class SQLiScanner:
                             "severity": "HIGH",
                             "details": self._extract_details(content)
                         })
-                    
-                    # Parse boolean-based blind injection
                     if "appears to be 'AND boolean-based blind" in content:
                         vulnerabilities.append({
                             "parameter": self._extract_parameter(content),
@@ -347,8 +253,6 @@ class SQLiScanner:
                             "severity": "HIGH",
                             "details": "Parameter is vulnerable to boolean-based blind SQL injection"
                         })
-
-                    # Parse error-based injection
                     if "appears to be 'MySQL >= 5.0 error-based" in content:
                         vulnerabilities.append({
                             "parameter": self._extract_parameter(content),
@@ -356,29 +260,23 @@ class SQLiScanner:
                             "severity": "CRITICAL",
                             "details": "Parameter is vulnerable to error-based SQL injection"
                         })
-
             return {
-                "vulnerabilities": {
-                    "SQLi": vulnerabilities
-                },
+                "vulnerabilities": {"SQLi": vulnerabilities},
                 "statistics": {
                     "duration": str(self.end_time - self.start_time) if self.end_time else "N/A",
-                    "requests": len(vulnerabilities),
-                    "payloads_tested": self.payloads_tested  # Add payloads count to statistics
+                    "vulnerabilities_found": len(vulnerabilities),
+                    "payloads_tested": self.payloads_tested
                 }
             }
-
         except Exception as e:
-            logging.error(f"Error parsing results: {str(e)}")
+            logging.error("Error parsing results: %s", str(e))
             return self._create_empty_result()
 
     def _extract_parameter(self, content):
-        """Extract vulnerable parameter from SQLMap output"""
         match = re.search(r"parameter '([^']+)'", content)
         return match.group(1) if match else "Unknown"
 
     def _extract_vulnerability_type(self, content):
-        """Extract vulnerability type from SQLMap output"""
         if "boolean-based blind" in content:
             return "Boolean-based blind SQL injection"
         elif "error-based" in content:
@@ -390,99 +288,56 @@ class SQLiScanner:
         return "SQL injection"
 
     def _extract_details(self, content):
-        """Extract detailed information from SQLMap output"""
         details = []
-        
-        if "the back-end DBMS is" in content:
-            dbms_match = re.search(r"the back-end DBMS is '([^']+)'", content)
-            if dbms_match:
-                details.append(f"Database: {dbms_match.group(1)}")
-        
-        if "appears to be" in content:
-            vuln_match = re.search(r"appears to be '([^']+)'", content)
-            if vuln_match:
-                details.append(f"Vulnerability: {vuln_match.group(1)}")
-
+        dbms_match = re.search(r"the back-end DBMS is '([^']+)'", content)
+        if dbms_match:
+            details.append(f"Database: {dbms_match.group(1)}")
+        vuln_match = re.search(r"appears to be '([^']+)'", content)
+        if vuln_match:
+            details.append(f"Vulnerability: {vuln_match.group(1)}")
         return " | ".join(details) if details else "SQL injection vulnerability detected"
 
     def _create_empty_result(self):
-        """Create an empty result structure"""
         return {
-            "vulnerabilities": {
-                "SQLi": []
-            },
+            "vulnerabilities": {"SQLi": []},
             "statistics": {
                 "duration": "0s",
-                "requests": 0,
-                "payloads_tested": self.payloads_tested  # Include payload count even for empty results
+                "vulnerabilities_found": 0,
+                "payloads_tested": self.payloads_tested
             }
         }
 
     def generate_report(self, results):
-        """Generate a detailed scan report"""
-        if "error" in results:
-            return f"\n❌ Scan failed: {results['error']}"
-
         vulnerabilities = results.get("vulnerabilities", {}).get("SQLi", [])
-        
-        report = f"""
-🎯 SQL INJECTION SCAN REPORT
-═══════════════════════════════════════════════════════════════
-📅 Scan Date: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}
-⏱️  Duration: {self.end_time - self.start_time if self.end_time else 'N/A'}
-🌐 Target: {self.target_url}
-🎲 Risk Level: {self.risk}
-🧪 Payloads Tested: {self.payloads_tested}
-✨ Found Vulnerabilities: {len(vulnerabilities)}
-
-"""
-
-        if vulnerabilities:
+        vuln_count = len(vulnerabilities)
+        duration = str(self.end_time - self.start_time) if self.end_time else "N/A"
+        report = (
+            f"\n🎯 SQL INJECTION SCAN REPORT\n"
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"📅 Scan Date: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"⏱️  Duration: {duration}\n"
+            f"🌐 Target: {self.target_url}\n"
+            f"🎲 Risk Level: {self.risk}\n"
+            f"🧪 Payloads Tested: {self.payloads_tested}\n"
+            f"✨ Found Vulnerabilities: {vuln_count}\n\n"
+        )
+        if vuln_count == 0:
+            report += "ℹ️  No SQL injection vulnerabilities were found\n"
+        else:
             report += " DETAILED FINDINGS\n"
             report += "═══════════════════════════════════════════════════════════════\n"
-            
             for i, vuln in enumerate(vulnerabilities, 1):
-                report += f"\n{i}. {Fore.RED}[{vuln.get('severity', 'UNKNOWN')}]{Fore.WHITE} {vuln.get('type', 'Unknown')}\n"
-                report += f"   Parameter: {vuln.get('parameter', 'N/A')}\n"
-                report += f"   Details: {vuln.get('details', 'N/A')}\n"
-                
-        else:
-            report += f"ℹ️  No SQL injection vulnerabilities were found\n"
-            
-        report += "\n═══════════════════════════════════════════════════════════════"
+                report += (
+                    f"\n{i}. [{vuln.get('severity', 'UNKNOWN')}] {vuln.get('type', 'Unknown')}\n"
+                    f"   Parameter: {vuln.get('parameter', 'N/A')}\n"
+                    f"   Details: {vuln.get('details', 'N/A')}\n"
+                )
+        report += "═══════════════════════════════════════════════════════════════"
         return report
 
-    def _get_sqlmap_path(self):
-        """Find or install SQLMap"""
-        try:
-            # First try: Check if sqlmap is in PATH
-            result = subprocess.run(["sqlmap", "--version"], 
-                                  capture_output=True, 
-                                  text=True)
-            if result.returncode == 0:
-                return "sqlmap"
-        except FileNotFoundError:
-            print("\n⚠️ SQLMap not found in PATH. Attempting to install...")
-            try:
-                # Try to install sqlmap using pip
-                subprocess.run([sys.executable, "-m", "pip", "install", "sqlmap"], 
-                             check=True)
-                print("✅ SQLMap installed successfully!")
-                return "sqlmap"
-            except subprocess.CalledProcessError:
-                print("❌ Failed to install SQLMap using pip.")
-                print("\nPlease install SQLMap manually:")
-                print("1. Run: pip install sqlmap")
-                print("   or")
-                print("2. Download from: https://github.com/sqlmapproject/sqlmap")
-                return None
-
-    def _check_command_exists(self, cmd):
-        """Check if a command exists in system PATH"""
-        try:
-            subprocess.run([cmd, "--version"], 
-                          capture_output=True, 
-                          text=True)
-            return True
-        except FileNotFoundError:
-            return False
+if __name__ == "__main__":
+    # Example usage for testing
+    target = "https://markme.framer.media/"
+    custom_sql = "SELECT version()"
+    scanner = SQLiScanner(target_url=target, depth=3, risk=1, custom_query=custom_sql)
+    scanner.run_scan()

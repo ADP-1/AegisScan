@@ -18,7 +18,7 @@ env/
 *.sublime-workspace
 
 # Reports (ignore generated reports, keep sample)
-reports/*
+reports/
 !reports/sample_report.json
 
 # Local configurations
