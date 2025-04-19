@@ -9,7 +9,7 @@ setuptools>=75.0.0  # for package installation
 urllib3==2.0.7  # HTTP client (used by requests)
 lxml==4.9.3  # HTML parser (used by BeautifulSoup)
 soupsieve==2.5  # CSS selector for BeautifulSoup
-
+validators==0.22.0
 # Testing
 pytest==8.1.1 
 
